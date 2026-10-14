@@ -1,0 +1,32 @@
+[package]
+name = "lemure"
+version = "0.2.1"
+edition = "2024"
+description = "Client SQL leggero per MySQL e PostgreSQL (GTK4)"
+license = "MIT"
+repository = "https://github.com/enrico-bonelli/lemure"
+readme = "README.md"
+keywords = ["sql", "mysql", "postgresql", "gtk4", "database"]
+categories = ["database", "gui"]
+
+[dependencies]
+async-channel = "2.5.0"
+dirs = "7.0.0"
+gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
+mysql = { version = "28.0.3", default-features = false, features = ["minimal"] }
+pangocairo = "0.22"
+postgres = "0.19.14"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sqlparser = "0.63.0"
+
+[features]
+# Strumenti di test della UI (script di automazione e screenshot), non inclusi nella build normale.
+devtools = []
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

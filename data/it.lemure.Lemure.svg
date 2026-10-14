@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d8bd9"/>
+      <stop offset="1" stop-color="#1c4f8f"/>
+    </linearGradient>
+    <linearGradient id="db" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8f1fb"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfdff1"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bg)"/>
+  <!-- cilindro del database -->
+  <path d="M30 38 v52 c0 8 15 14 34 14 s34 -6 34 -14 v-52" fill="url(#db)"/>
+  <ellipse cx="64" cy="38" rx="34" ry="13" fill="#ffffff"/>
+  <ellipse cx="64" cy="38" rx="34" ry="13" fill="none" stroke="#9cbde3" stroke-width="2"/>
+  <path d="M30 56 c0 8 15 14 34 14 s34 -6 34 -14" fill="none" stroke="#9cbde3" stroke-width="2.5"/>
+  <path d="M30 74 c0 8 15 14 34 14 s34 -6 34 -14" fill="none" stroke="#9cbde3" stroke-width="2.5"/>
+  <!-- coda ad anelli del lemure -->
+  <path d="M94 98 c18 2 26 -14 18 -30 c-5 -10 -17 -9 -17 0" fill="none" stroke="#202020" stroke-width="9" stroke-linecap="round"/>
+  <path d="M94 98 c18 2 26 -14 18 -30 c-5 -10 -17 -9 -17 0" fill="none" stroke="#ffffff" stroke-width="9" stroke-dasharray="6 6"/>
+</svg>

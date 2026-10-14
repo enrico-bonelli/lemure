@@ -1,0 +1,15 @@
+DROP TABLE IF EXISTS order_items, orders, products, customers CASCADE;
+DROP SCHEMA IF EXISTS sales CASCADE;
+CREATE TABLE customers (id serial PRIMARY KEY, name varchar(100) NOT NULL, email varchar(150) NOT NULL UNIQUE, city text, created_at timestamptz NOT NULL DEFAULT now(), notes text);
+CREATE INDEX idx_customers_city ON customers(city);
+CREATE TABLE products (sku char(8) PRIMARY KEY, title varchar(200) NOT NULL, price numeric(10,2) NOT NULL, data jsonb, thumb bytea);
+CREATE TABLE orders (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, customer_id int NOT NULL REFERENCES customers(id) ON DELETE CASCADE, total numeric(12,2) NOT NULL, status text NOT NULL DEFAULT 'new', ordered_on date NOT NULL);
+CREATE INDEX idx_orders_status_date ON orders(status, ordered_on);
+CREATE TABLE order_items (order_id bigint REFERENCES orders(id), sku char(8) REFERENCES products(sku), qty int NOT NULL, PRIMARY KEY (order_id, sku));
+CREATE SCHEMA sales;
+CREATE TABLE sales.targets (year int, region text, amount numeric, PRIMARY KEY(year, region));
+CREATE VIEW v_customer_totals AS SELECT c.id, c.name, SUM(o.total) tot FROM customers c JOIN orders o ON o.customer_id=c.id GROUP BY c.id, c.name;
+INSERT INTO customers (name,email,city,notes) SELECT 'Cliente '||n, 'c'||n||'@example.com', (ARRAY['Roma','Milano','Torino',NULL,'Napoli'])[1 + n % 5], CASE WHEN n % 7 = 0 THEN E'nota multiriga\nseconda; riga' END FROM generate_series(1,12345) n;
+INSERT INTO products VALUES ('SKU00001','Penna',1.50,'{"color":"blu"}','\x89504e47'),('SKU00002','Quaderno',3.20,NULL,NULL);
+INSERT INTO orders (customer_id,total,status,ordered_on) SELECT 1 + n % 12345, round((n*1.37)::numeric % 500, 2), (ARRAY['new','paid','shipped'])[1 + n % 3], date '2025-01-01' + (n % 365) FROM generate_series(1,30000) n;
+INSERT INTO order_items SELECT id, 'SKU00001', 1 FROM orders WHERE id <= 1000;
