@@ -1,18 +1,20 @@
 [package]
 name = "lemure"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
-description = "Client SQL leggero per MySQL e PostgreSQL (GTK4)"
+rust-version = "1.88"
+description = "Client leggero per MySQL, PostgreSQL e MongoDB (GTK4)"
 license = "MIT"
 repository = "https://github.com/enrico-bonelli/lemure"
 readme = "README.md"
-keywords = ["sql", "mysql", "postgresql", "gtk4", "database"]
+keywords = ["mysql", "postgresql", "mongodb", "gtk4", "database"]
 categories = ["database", "gui"]
 
 [dependencies]
 async-channel = "2.5.0"
 dirs = "7.0.0"
 gtk = { version = "0.11", package = "gtk4", features = ["v4_12"] }
+mongodb = { version = "3.9", features = ["sync"] }
 mysql = { version = "28.0.3", default-features = false, features = ["minimal"] }
 pangocairo = "0.22"
 postgres = "0.19.14"

@@ -34,6 +34,8 @@ pub struct Token {
 pub enum Dialect {
     MySql,
     Postgres,
+    /// Sintassi della shell di MongoDB (`db.collection.find({...})`), simile a JavaScript.
+    Mongo,
 }
 
 struct Cursor<'a> {
@@ -85,7 +87,8 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
         pos: 0,
         chars: 0,
     };
-    let mut out = Vec::with_capacity(src.len() / 4);
+    let mut out: Vec<Token> = Vec::with_capacity(src.len() / 4);
+    let mongo = dialect == Dialect::Mongo;
     while let Some(b) = c.peek() {
         let (start, cstart) = (c.pos, c.chars);
         let kind = match b {
@@ -95,7 +98,7 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
                 }
                 Tok::Space
             }
-            b'-' if c.peek_at(1) == Some(b'-') => {
+            b'-' if !mongo && c.peek_at(1) == Some(b'-') => {
                 while !matches!(c.peek(), None | Some(b'\n')) {
                     c.bump();
                 }
@@ -106,6 +109,17 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
                     c.bump();
                 }
                 Tok::Comment
+            }
+            b'/' if mongo && c.peek_at(1) == Some(b'/') => {
+                while !matches!(c.peek(), None | Some(b'\n')) {
+                    c.bump();
+                }
+                Tok::Comment
+            }
+            // Espressione regolare JavaScript (`/abc/i`) dove è atteso un valore.
+            b'/' if mongo && c.peek_at(1) != Some(b'*') && regex_allowed(&out, src) => {
+                lex_regex(&mut c);
+                Tok::Str
             }
             b'/' if c.peek_at(1) == Some(b'*') => {
                 c.bump();
@@ -118,18 +132,22 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
                 Tok::Comment
             }
             b'\'' => {
-                let backslash = dialect == Dialect::MySql
+                let backslash = dialect != Dialect::Postgres
                     || (start > 0 && matches!(src.as_bytes()[start - 1], b'E' | b'e'));
                 lex_quoted(&mut c, b'\'', backslash);
                 Tok::Str
             }
             b'"' => {
-                lex_quoted(&mut c, b'"', dialect == Dialect::MySql);
-                if dialect == Dialect::MySql {
+                lex_quoted(&mut c, b'"', dialect != Dialect::Postgres);
+                if dialect != Dialect::Postgres {
                     Tok::Str
                 } else {
                     Tok::QuotedIdent
                 }
+            }
+            b'`' if mongo => {
+                lex_quoted(&mut c, b'`', true);
+                Tok::Str
             }
             b'`' => {
                 lex_quoted(&mut c, b'`', false);
@@ -198,7 +216,7 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
                     Tok::Number
                 }
             }
-            b'?' => {
+            b'?' if !mongo => {
                 c.bump();
                 Tok::Param
             }
@@ -241,6 +259,51 @@ pub fn lex(src: &str, dialect: Dialect) -> Vec<Token> {
     out
 }
 
+/// In JavaScript `/` apre una regex solo dove è atteso un valore (non dopo un operando).
+fn regex_allowed(out: &[Token], src: &str) -> bool {
+    match out
+        .iter()
+        .rev()
+        .find(|t| !matches!(t.kind, Tok::Space | Tok::Comment))
+    {
+        None => true,
+        Some(t) => match t.kind {
+            Tok::OpenParen | Tok::Semicolon => true,
+            Tok::Punct => matches!(
+                &src[t.start..t.end],
+                "," | ":" | "[" | "{" | "=" | "!" | "&" | "|" | "?"
+            ),
+            _ => false,
+        },
+    }
+}
+
+fn lex_regex(c: &mut Cursor) {
+    c.bump();
+    let mut in_class = false;
+    while let Some(b) = c.peek() {
+        match b {
+            b'\\' => {
+                c.bump();
+                c.bump();
+                continue;
+            }
+            b'\n' => return,
+            b'[' => in_class = true,
+            b']' => in_class = false,
+            b'/' if !in_class => {
+                c.bump();
+                while c.peek().is_some_and(|f| f.is_ascii_alphabetic()) {
+                    c.bump();
+                }
+                return;
+            }
+            _ => {}
+        }
+        c.bump();
+    }
+}
+
 fn lex_quoted(c: &mut Cursor, quote: u8, backslash: bool) {
     c.bump();
     while let Some(b) = c.peek() {
@@ -281,6 +344,18 @@ pub struct Stmt {
 
 /// Separa gli statement su `;` e (opzionalmente) sulle righe vuote.
 pub fn split_statements(toks: &[Token], blank_line_delimits: bool, src: &str) -> Vec<Stmt> {
+    split_statements_in(toks, blank_line_delimits, src, Dialect::MySql)
+}
+
+/// Come `split_statements`; con MongoDB (come in JavaScript) anche un a capo
+/// seguito da `db`, `show` o `use` inizia un nuovo comando, mentre una riga
+/// che inizia con `.` continua la catena.
+pub fn split_statements_in(
+    toks: &[Token],
+    blank_line_delimits: bool,
+    src: &str,
+    dialect: Dialect,
+) -> Vec<Stmt> {
     let mut out = Vec::new();
     let mut cur: Option<Stmt> = None;
     let mut depth = 0i32;
@@ -289,17 +364,20 @@ pub fn split_statements(toks: &[Token], blank_line_delimits: bool, src: &str) ->
             out.push(s);
         }
     };
-    for t in toks {
+    for (i, t) in toks.iter().enumerate() {
         match t.kind {
             Tok::Semicolon => {
                 close(&mut cur, &mut out);
                 depth = 0;
             }
             Tok::Space => {
-                if blank_line_delimits
-                    && depth == 0
-                    && src[t.start..t.end].bytes().filter(|&b| b == b'\n').count() >= 2
-                {
+                let newlines = src[t.start..t.end].bytes().filter(|&b| b == b'\n').count();
+                let new_command = dialect == Dialect::Mongo
+                    && newlines >= 1
+                    && toks.get(i + 1).is_some_and(|n| {
+                        n.kind == Tok::Word && matches!(&src[n.start..n.end], "db" | "show" | "use")
+                    });
+                if depth == 0 && ((blank_line_delimits && newlines >= 2) || new_command) {
                     close(&mut cur, &mut out);
                 }
             }
@@ -355,6 +433,9 @@ fn upper_word(src: &str, t: &Token) -> String {
 /// Se lo statement è una SELECT senza clausole che impediscono di aggiungere
 /// `LIMIT/OFFSET`, ritorna il testo pulito da usare come base per la paginazione.
 pub fn pageable_base(sql: &str, dialect: Dialect) -> Option<String> {
+    if dialect == Dialect::Mongo {
+        return crate::mongo::parse::pageable_base(sql);
+    }
     let toks = lex(sql, dialect);
     let mut depth = 0i32;
     let mut first: Option<String> = None;
@@ -408,8 +489,12 @@ pub fn pageable_base(sql: &str, dialect: Dialect) -> Option<String> {
     }
 }
 
-pub fn paged_sql(base: &str, limit: usize, offset: usize) -> String {
-    format!("{base}\nLIMIT {limit} OFFSET {offset}")
+pub fn paged_sql(base: &str, limit: usize, offset: usize, dialect: Dialect) -> String {
+    match dialect {
+        // vedi mongo::parse: skip/limit aggiunti in coda alla catena
+        Dialect::Mongo => format!("{base}\n.skip({offset}).limit({limit})"),
+        _ => format!("{base}\nLIMIT {limit} OFFSET {offset}"),
+    }
 }
 
 /// SQL per contare le righe di una query paginabile. Quando possibile la
@@ -417,6 +502,9 @@ pub fn paged_sql(base: &str, limit: usize, offset: usize) -> String {
 /// anche con colonne omonime nelle JOIN, che MySQL rifiuta in una subquery);
 /// altrimenti la query viene racchiusa in una subquery.
 pub fn count_sql(base: &str, dialect: Dialect) -> String {
+    if dialect == Dialect::Mongo {
+        return format!("{base}\n.maxTimeMS(15000).size()");
+    }
     if let Some(direct) = direct_count_sql(base, dialect) {
         return direct;
     }
@@ -427,7 +515,9 @@ pub fn count_sql(base: &str, dialect: Dialect) -> String {
                 "SELECT /*+ MAX_EXECUTION_TIME(15000) */ COUNT(*) FROM (\n{base}\n) AS lemure_count"
             )
         }
-        Dialect::Postgres => format!("SELECT COUNT(*) FROM (\n{base}\n) AS lemure_count"),
+        Dialect::Postgres | Dialect::Mongo => {
+            format!("SELECT COUNT(*) FROM (\n{base}\n) AS lemure_count")
+        }
     }
 }
 
@@ -475,6 +565,9 @@ fn direct_count_sql(base: &str, dialect: Dialect) -> Option<String> {
 
 /// Primo token-parola dello statement in maiuscolo (per capire il tipo).
 pub fn first_keyword(sql: &str, dialect: Dialect) -> String {
+    if dialect == Dialect::Mongo {
+        return crate::mongo::parse::statement_keyword(sql).to_string();
+    }
     lex(sql, dialect)
         .iter()
         .find(|t| t.kind == Tok::Word)
@@ -501,6 +594,7 @@ pub fn check_syntax(sql: &str, dialect: Dialect) -> Option<SyntaxIssue> {
     let res = match dialect {
         Dialect::MySql => Parser::parse_sql(&MySqlDialect {}, sql),
         Dialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql),
+        Dialect::Mongo => return crate::mongo::parse::check_script(sql),
     };
     let err = res.err()?;
     let msg = err.to_string();
@@ -592,6 +686,15 @@ pub enum WordClass {
     Plain,
 }
 
+/// Classifica una parola secondo il dialetto (per l'evidenziazione).
+pub fn classify_word_in(word: &str, followed_by_paren: bool, dialect: Dialect) -> WordClass {
+    if dialect == Dialect::Mongo {
+        crate::mongo::parse::classify_word(word, followed_by_paren)
+    } else {
+        classify_word(word, followed_by_paren)
+    }
+}
+
 /// Classifica una parola senza allocare (buffer su stack).
 pub fn classify_word(word: &str, followed_by_paren: bool) -> WordClass {
     let bytes = word.as_bytes();
@@ -677,7 +780,7 @@ pub fn is_reserved(word: &str) -> bool {
 /// Quota l'identificatore solo se necessario (caratteri speciali o keyword).
 pub fn quote_ident_if_needed(name: &str, dialect: Dialect) -> String {
     match dialect {
-        Dialect::Postgres => quote_ident(name, dialect),
+        Dialect::Postgres | Dialect::Mongo => quote_ident(name, dialect),
         Dialect::MySql => {
             let simple = name
                 .chars()
@@ -699,6 +802,8 @@ pub fn quote_ident_if_needed(name: &str, dialect: Dialect) -> String {
 /// Quota un identificatore secondo il dialetto.
 pub fn quote_ident(name: &str, dialect: Dialect) -> String {
     match dialect {
+        // nella shell i nomi non si quotano: chi chiama usa getCollection("…") se serve
+        Dialect::Mongo => name.to_string(),
         Dialect::MySql => format!("`{}`", name.replace('`', "``")),
         Dialect::Postgres => {
             let simple = name

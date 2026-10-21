@@ -1,6 +1,7 @@
 # Lemure
 
-Client SQL desktop per **MySQL** e **PostgreSQL**, leggero e veloce, scritto in Rust con GTK4.
+Client desktop per **MySQL**, **PostgreSQL** e **MongoDB**, leggero e veloce, scritto in Rust con
+GTK4.
 
 Lemure nasce per il lavoro quotidiano dello sviluppatore: si sceglie un datasource, si scrive la
 query con evidenziazione, controllo sintattico e autocompletamento, e si sfogliano i risultati
@@ -13,7 +14,7 @@ anche quando sono milioni di righe, senza che l'interfaccia si blocchi. È un'ap
 ## Funzionalità
 
 **Connessioni e schema**
-- Elenco di datasource MySQL e PostgreSQL nel pannello a sinistra: aggiunta, modifica,
+- Elenco di datasource MySQL, PostgreSQL e MongoDB nel pannello a sinistra: aggiunta, modifica,
   duplicazione, eliminazione e test della connessione. Un clic apre la connessione.
 - Albero dello schema in ordine alfabetico: datasource → database (se non indicato) → tabelle e
   viste → colonne con tipo, `NOT NULL` e chiave (PRI/UNI/MUL/FK).
@@ -59,12 +60,60 @@ anche quando sono milioni di righe, senza che l'interfaccia si blocchi. È un'ap
   - si esportano tutte le righe oppure solo la pagina corrente;
   - le righe vengono scritte in streaming, senza caricarle in memoria (su PostgreSQL tramite
     `COPY`).
-- **Stop** della query in corso: `KILL QUERY` su MySQL, cancel request su PostgreSQL.
+- **Stop** della query in corso: `KILL QUERY` su MySQL, cancel request su PostgreSQL, `killOp` su
+  MongoDB.
 - Ogni scheda ha la propria connessione, quindi più query possono girare in parallelo.
+
+## MongoDB
+
+Su un datasource MongoDB l'editor accetta la sintassi della shell (`mongosh`), con i valori scritti
+come letterali JavaScript: chiavi senza virgolette, stringhe con apici singoli o doppi, regex
+`/…/i`, `ObjectId("…")`, `ISODate("…")`, `NumberLong(…)`, `NumberDecimal("…")`, `UUID("…")`.
+
+```js
+db.orders.find({status: "paid", total: {$gte: 100}}, {items: 0}).sort({ordered_on: -1})
+db.orders.aggregate([
+  {$match: {status: "paid"}},
+  {$group: {_id: "$customer_id", total: {$sum: "$total"}}},
+  {$sort: {total: -1}}
+])
+db.customers.updateMany({"address.city": null}, {$set: {"address.city": "n/d"}})
+db.getCollection("event-log").countDocuments({})
+show collections
+use other_db
+```
+
+- **Comandi supportati**:
+  - lettura: `find`/`findOne` con `sort`, `skip`, `limit`, `projection`, `hint`, `count`, `explain`;
+    `aggregate`, `countDocuments`, `estimatedDocumentCount`, `distinct`;
+  - scrittura: `insertOne`/`insertMany`, `updateOne`/`updateMany`, `replaceOne`,
+    `deleteOne`/`deleteMany`;
+  - indici e collection: `createIndex`, `dropIndex`, `getIndexes`, `drop`, `stats`,
+    `renameCollection`;
+  - database: `db.createCollection`, `db.createView`, `db.runCommand`, `db.adminCommand`,
+    `db.stats()`, `db.getSiblingDB("…")`, `show dbs`, `show collections`, `use`.
+
+  Variabili e funzioni JavaScript non sono supportate.
+- **Risultati**: una colonna per ogni campo di primo livello, con `_id` per primo. Sotto-documenti e
+  array sono mostrati in JSON (extended JSON), che si può copiare direttamente in un filtro. Il tipo
+  di ogni colonna è indicato nel menu dell'intestazione.
+- **Paginazione**: `find` (senza `limit`) e `aggregate` vengono rieseguiti con `skip`/`limit` e il
+  totale si conta in background, come per le `SELECT`.
+- **Schema**: i campi di una collection, anche annidati (`indirizzo.citta`), vengono dedotti da un
+  campione casuale di 200 documenti, con i tipi trovati e gli indici. *Analizza collection* mostra
+  statistiche, campi con la loro frequenza, indici e i comandi per ricreare collection e indici.
+- **Autocompletamento** di collection, metodi, campi (in filtri, proiezioni, ordinamenti e
+  aggiornamenti), operatori `$` adatti al contesto, stadi della pipeline e riferimenti `"$campo"`.
+- **Connessione**: host e porta, oppure un URI completo (`mongodb://…` o `mongodb+srv://…`)
+  nel campo host, per replica set, TLS o opzioni particolari. Utente e password sono facoltativi;
+  senza database indicato l'albero mostra tutti i database e l'editor parte da `test`.
+- **Esportazione CSV**: le colonne sono quelle dei primi 1000 documenti.
+
+Serve MongoDB 4.4 o successivo (limite del driver Rust ufficiale).
 
 ## Requisiti
 
-- Rust 1.85 o successivo (edizione 2024)
+- Rust 1.88 o successivo (edizione 2024)
 - GTK 4.12 o successivo, con i file di sviluppo, e `pkg-config`
 
 | Distribuzione | Pacchetti |
@@ -73,7 +122,8 @@ anche quando sono milioni di righe, senza che l'interfaccia si blocchi. È un'ap
 | Debian / Ubuntu (24.04+) | `sudo apt install cargo libgtk-4-dev pkg-config build-essential` |
 | Fedora | `sudo dnf install cargo gtk4-devel pkgconf-pkg-config gcc` |
 
-Non servono librerie client di MySQL o PostgreSQL: i driver sono scritti interamente in Rust.
+Non servono librerie client di MySQL, PostgreSQL o MongoDB: i driver sono scritti interamente in
+Rust.
 
 ## Compilazione e installazione
 
@@ -116,7 +166,9 @@ Per disinstallarlo basta rimuovere `~/.local/bin/lemure`,
 | `Alt+←` / `Alt+→` | Pagina precedente / successiva |
 | `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Dimensione dei caratteri |
 
-Gli statement sono separati da `;` oppure da una riga vuota.
+Gli statement sono separati da `;` oppure da una riga vuota. Con MongoDB anche una nuova riga che
+inizia con `db.`, `show` o `use` apre un nuovo comando, mentre una riga che inizia con `.` continua
+la catena (`.sort(…)`).
 
 ## Dove vengono salvati i dati
 
@@ -140,6 +192,7 @@ Per ridurre l'uso di memoria a scapito della fluidità si può usare il renderer
 | Modulo | Ruolo |
 |---|---|
 | `src/db.rs` | driver sincroni (`mysql`, `postgres`) con protocollo testuale, metadati, analisi delle tabelle, export CSV in streaming |
+| `src/mongo/` | MongoDB: parser della sintassi della shell (letterali JavaScript → BSON), esecuzione con il driver `mongodb` sincrono, campi dedotti a campione, autocompletamento |
 | `src/worker.rs` | un thread per connessione: la UI invia closure e attende il risultato su un canale asincrono, quindi il main loop GTK non si blocca mai |
 | `src/sqlutil.rs` | lexer SQL (evidenziazione, separazione degli statement, query paginabili, SQL di conteggio) e controllo sintattico con `sqlparser` |
 | `src/completion.rs` | autocompletamento: analisi del contesto e degli alias, filtro dei candidati |
@@ -153,15 +206,18 @@ cargo test        # test unitari
 ```
 
 I test d'integrazione girano contro database reali e vengono saltati se le variabili d'ambiente
-non sono impostate. Per eseguirli si possono usare due container usa e getta:
+non sono impostate. Per eseguirli si possono usare dei container usa e getta:
 
 ```sh
 docker run -d --name lemure-test-mysql -e MYSQL_ROOT_PASSWORD=lemure -e MYSQL_DATABASE=testdb -p 13306:3306 mysql:8.4
 docker run -d --name lemure-test-pg -e POSTGRES_PASSWORD=lemure -e POSTGRES_DB=testdb -p 15432:5432 postgres:16
+docker run -d --name lemure-test-mongo -p 27018:27017 mongo:4.4
 # attendere qualche secondo che i server siano pronti, poi:
 docker exec -i lemure-test-mysql mysql -uroot -plemure testdb < testdata/mysql_seed.sql
 docker exec -i lemure-test-pg psql -q -U postgres testdb < testdata/pg_seed.sql
-LEMURE_TEST_MYSQL=127.0.0.1:13306 LEMURE_TEST_PG=127.0.0.1:15432 cargo test --test live_db
+docker exec -i lemure-test-mongo mongo --quiet < testdata/mongo_seed.js   # mongosh con MongoDB ≥ 6
+LEMURE_TEST_MYSQL=127.0.0.1:13306 LEMURE_TEST_PG=127.0.0.1:15432 LEMURE_TEST_MONGO=127.0.0.1:27018 \
+  cargo test --test live_db
 ```
 
 La feature `devtools` (`cargo build --features devtools`) abilita uno script di automazione della

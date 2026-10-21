@@ -1,12 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=Lemure
-GenericName=Client SQL
-Comment=Client SQL leggero per MySQL e PostgreSQL
+GenericName=Client database
+Comment=Client leggero per MySQL, PostgreSQL e MongoDB
 Exec=lemure
 Icon=it.lemure.Lemure
 Terminal=false
 Categories=Development;Database;GTK;
-Keywords=sql;mysql;postgres;postgresql;database;query;
+Keywords=sql;mysql;postgres;postgresql;mongodb;mongo;database;query;
 StartupNotify=true
 StartupWMClass=it.lemure.Lemure

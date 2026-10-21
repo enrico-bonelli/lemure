@@ -479,15 +479,30 @@ impl Sidebar {
                 menu.append(Some("Copia nome"), Some("side.copy-name"));
             }
             NodeKind::Table | NodeKind::View => {
+                let mongo =
+                    self.app.upgrade().and_then(|a| a.ds_kind(&node.ds_id)) == Some(DbKind::Mongo);
                 let s1 = gio::Menu::new();
-                s1.append(Some("Analizza tabella"), Some("side.analyze"));
-                s1.append(Some("Mostra dati (SELECT *)"), Some("side.select-all"));
-                s1.append(Some("Conta righe"), Some("side.count"));
+                if mongo {
+                    s1.append(Some("Analizza collection"), Some("side.analyze"));
+                    s1.append(Some("Mostra documenti (find)"), Some("side.select-all"));
+                    s1.append(Some("Conta documenti"), Some("side.count"));
+                } else {
+                    s1.append(Some("Analizza tabella"), Some("side.analyze"));
+                    s1.append(Some("Mostra dati (SELECT *)"), Some("side.select-all"));
+                    s1.append(Some("Conta righe"), Some("side.count"));
+                }
                 menu.append_section(None, &s1);
                 let s2 = gio::Menu::new();
                 s2.append(Some("Copia nome"), Some("side.copy-name"));
                 s2.append(Some("Inserisci nell'editor"), Some("side.insert-name"));
-                s2.append(Some("Aggiorna colonne"), Some("side.refresh"));
+                s2.append(
+                    Some(if mongo {
+                        "Aggiorna campi"
+                    } else {
+                        "Aggiorna colonne"
+                    }),
+                    Some("side.refresh"),
+                );
                 menu.append_section(None, &s2);
             }
             NodeKind::Column => {
@@ -559,9 +574,10 @@ impl Sidebar {
         });
         add("new-query", |_, app, n| {
             if let Some(n) = n {
-                let sql = if n.kind == NodeKind::Database
-                    && app.ds_kind(&n.ds_id) == Some(DbKind::MySql)
-                {
+                let kind = app.ds_kind(&n.ds_id);
+                let sql = if n.kind == NodeKind::Database && kind == Some(DbKind::Mongo) {
+                    format!("use {}\n\n", n.name)
+                } else if n.kind == NodeKind::Database && kind == Some(DbKind::MySql) {
                     format!(
                         "USE {};\n\n",
                         lemure::sqlutil::quote_ident(&n.name, lemure::sqlutil::Dialect::MySql)
@@ -778,7 +794,10 @@ impl Sidebar {
         let worker = app.ensure_connected(&node.ds_id).await?;
         let ds_id = node.ds_id.clone();
         match node.kind {
-            NodeKind::DataSource if ds.kind == DbKind::MySql && ds.database.trim().is_empty() => {
+            // MySQL e MongoDB senza database predefinito: prima l'elenco dei database
+            NodeKind::DataSource
+                if ds.kind != DbKind::Postgres && ds.database.trim().is_empty() =>
+            {
                 let dbs = worker.run(|c| c.list_databases()).await??;
                 Ok(dbs
                     .iter()
@@ -788,7 +807,7 @@ impl Sidebar {
             NodeKind::DataSource | NodeKind::Database => {
                 let schema = if node.kind == NodeKind::Database {
                     node.name.clone()
-                } else if ds.kind == DbKind::MySql {
+                } else if ds.kind != DbKind::Postgres {
                     ds.database.trim().to_string()
                 } else {
                     String::new()

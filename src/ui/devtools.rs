@@ -244,6 +244,25 @@ pub fn start(app: &Rc<App>) {
                         );
                     }
                 }
+                "print-results" => {
+                    // riga di stato e intestazioni, senza i dati
+                    if let Some(t) = app.current_tab() {
+                        let cols: Vec<String> = t
+                            .results
+                            .grid
+                            .rowset()
+                            .columns
+                            .iter()
+                            .map(|c| format!("{}:{}", c.name, c.type_name))
+                            .collect();
+                        println!(
+                            "RESULTS {} | righe={} | {}",
+                            t.results.dev_info(),
+                            t.results.grid.row_count(),
+                            cols.join(", ")
+                        );
+                    }
+                }
                 "stop" => {
                     let _ = WidgetExt::activate_action(&app.window, "win.stop", None);
                 }

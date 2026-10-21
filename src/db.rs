@@ -1,4 +1,4 @@
-//! Accesso ai database (MySQL e PostgreSQL) con driver sincroni.
+//! Accesso ai database (MySQL, PostgreSQL e MongoDB) con driver sincroni.
 //!
 //! Ogni connessione vive su un thread dedicato (vedi `worker.rs`): qui ci sono
 //! solo funzioni bloccanti, semplici e veloci. I risultati vengono letti con
@@ -7,6 +7,7 @@
 
 use crate::completion::{CompColumn, SchemaMeta, TableMeta};
 use crate::config::{DataSource, DbKind};
+use crate::mongo::exec::{MongoCancel, MongoConn};
 use crate::sqlutil::{self, Dialect};
 use mysql::prelude::Queryable;
 use std::fs::File;
@@ -33,7 +34,12 @@ pub struct RowSet {
 #[derive(Clone, Debug)]
 pub enum StmtResult {
     Rows(RowSet),
-    Affected { rows: u64, message: String },
+    Affected {
+        rows: u64,
+        message: String,
+    },
+    /// Comando eseguito senza righe né conteggio (es. `use`, creazione di un indice).
+    Message(String),
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +104,7 @@ pub enum CancelHandle {
         connection_id: u32,
     },
     Postgres(postgres::CancelToken),
+    Mongo(MongoCancel),
 }
 
 impl CancelHandle {
@@ -112,6 +119,7 @@ impl CancelHandle {
                     .map_err(fmt_my_err)
             }
             CancelHandle::Postgres(tok) => tok.cancel_query(postgres::NoTls).map_err(fmt_pg_err),
+            CancelHandle::Mongo(m) => m.cancel(),
         }
     }
 }
@@ -122,12 +130,14 @@ pub enum DbConn {
         opts: mysql::Opts,
     },
     Postgres(postgres::Client),
+    Mongo(MongoConn),
 }
 
 pub fn dialect_of(kind: DbKind) -> Dialect {
     match kind {
         DbKind::MySql => Dialect::MySql,
         DbKind::Postgres => Dialect::Postgres,
+        DbKind::Mongo => Dialect::Mongo,
     }
 }
 
@@ -198,6 +208,7 @@ impl DbConn {
                 let client = cfg.connect(postgres::NoTls).map_err(fmt_pg_err)?;
                 Ok(DbConn::Postgres(client))
             }
+            DbKind::Mongo => Ok(DbConn::Mongo(MongoConn::open(ds)?)),
         }
     }
 
@@ -205,6 +216,7 @@ impl DbConn {
         match self {
             DbConn::MySql { .. } => Dialect::MySql,
             DbConn::Postgres(_) => Dialect::Postgres,
+            DbConn::Mongo(_) => Dialect::Mongo,
         }
     }
 
@@ -215,6 +227,7 @@ impl DbConn {
                 connection_id: conn.connection_id(),
             },
             DbConn::Postgres(c) => CancelHandle::Postgres(c.cancel_token()),
+            DbConn::Mongo(m) => CancelHandle::Mongo(m.cancel_handle()),
         }
     }
 
@@ -233,6 +246,7 @@ impl DbConn {
                 .query_one("SHOW server_version", &[])
                 .map(|r| format!("PostgreSQL {}", r.get::<_, String>(0)))
                 .unwrap_or_else(|_| "PostgreSQL".into()),
+            DbConn::Mongo(m) => m.server_version(),
         }
     }
 
@@ -241,6 +255,7 @@ impl DbConn {
         match self {
             DbConn::MySql { conn, .. } => conn.ping().is_ok(),
             DbConn::Postgres(c) => !c.is_closed() && c.simple_query("").is_ok(),
+            DbConn::Mongo(m) => m.is_alive(),
         }
     }
 
@@ -250,6 +265,7 @@ impl DbConn {
         match self {
             DbConn::MySql { conn, .. } => mysql_execute(conn, sql),
             DbConn::Postgres(c) => pg_execute(c, sql),
+            DbConn::Mongo(m) => m.execute(sql),
         }
     }
 
@@ -260,7 +276,7 @@ impl DbConn {
                 .into_iter()
                 .next()
                 .and_then(|r| r.into_iter().next().flatten())),
-            StmtResult::Affected { .. } => Ok(None),
+            StmtResult::Affected { .. } | StmtResult::Message(_) => Ok(None),
         }
     }
 
@@ -268,6 +284,7 @@ impl DbConn {
         let sql = match self {
             DbConn::MySql { .. } => "SELECT DATABASE()",
             DbConn::Postgres(_) => "SELECT current_schema()",
+            DbConn::Mongo(m) => return Ok(m.db.clone()),
         };
         Ok(self.query_scalar(sql)?.unwrap_or_default())
     }
@@ -285,6 +302,7 @@ impl DbConn {
                 .iter()
                 .map(|r| r.get(0))
                 .collect(),
+            DbConn::Mongo(m) => m.list_databases()?,
         };
         sort_ci(&mut out, |s| s);
         Ok(out)
@@ -326,6 +344,7 @@ impl DbConn {
                     }
                 })
                 .collect(),
+            DbConn::Mongo(m) => m.list_tables(schema)?,
         };
         sort_ci(&mut out, |t| &t.name);
         Ok(out)
@@ -365,6 +384,8 @@ impl DbConn {
                 .iter()
                 .map(|r| ColumnInfo { name: r.get(0), data_type: r.get(1), key: r.get(2), nullable: r.get(3) })
                 .collect(),
+            // già ordinati, con i sotto-campi subito dopo il campo che li contiene
+            DbConn::Mongo(m) => return m.list_columns(schema, table),
         };
         sort_ci(&mut out, |c| &c.name);
         Ok(out)
@@ -375,6 +396,9 @@ impl DbConn {
     /// le colonne vengono lasciate da caricare su richiesta.
     pub fn load_schema_meta(&mut self, max_tables: usize) -> DbResult<SchemaMeta> {
         use std::collections::HashMap;
+        if let DbConn::Mongo(m) = self {
+            return m.load_schema_meta();
+        }
         let mut meta = SchemaMeta {
             default_schema: self.current_schema()?,
             ..Default::default()
@@ -466,6 +490,7 @@ impl DbConn {
                         .collect();
                 }
             }
+            DbConn::Mongo(_) => unreachable!(),
         }
         if meta.tables.len() <= max_tables {
             let mut by_table: HashMap<(String, String), Vec<CompColumn>> = HashMap::new();
@@ -490,6 +515,7 @@ impl DbConn {
         match self {
             DbConn::MySql { conn, .. } => mysql_analyze(conn, schema, table),
             DbConn::Postgres(c) => pg_analyze(c, schema, table),
+            DbConn::Mongo(m) => m.analyze(schema, table),
         }
     }
 
@@ -508,6 +534,7 @@ impl DbConn {
         let n = match self {
             DbConn::MySql { conn, .. } => mysql_export(conn, sql, &mut w, opts, stop, progress)?,
             DbConn::Postgres(c) => pg_export(c, sql, &mut w, opts, stop, progress)?,
+            DbConn::Mongo(m) => m.export_csv(sql, &mut w, opts, stop, progress)?,
         };
         w.flush().map_err(|e| e.to_string())?;
         Ok(n)
@@ -955,7 +982,7 @@ fn describe_key(pk: Option<&IndexInfo>, generated: Option<String>) -> String {
     }
 }
 
-fn human_bytes(v: &str) -> String {
+pub(crate) fn human_bytes(v: &str) -> String {
     let Ok(n) = v.parse::<f64>() else {
         return v.to_string();
     };
@@ -1091,7 +1118,7 @@ fn pg_export(
     }
     let rs = match pg_execute(c, sql)? {
         StmtResult::Rows(rs) => rs,
-        StmtResult::Affected { .. } => return Err("Lo statement non restituisce righe".into()),
+        _ => return Err("Lo statement non restituisce righe".into()),
     };
     if opts.header {
         write_csv_row(w, rs.columns.iter().map(|c| Some(c.name.as_str())), opts)?;

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 pub enum DbKind {
     MySql,
     Postgres,
+    Mongo,
 }
 
 impl DbKind {
@@ -20,6 +21,7 @@ impl DbKind {
         match self {
             DbKind::MySql => "MySQL",
             DbKind::Postgres => "PostgreSQL",
+            DbKind::Mongo => "MongoDB",
         }
     }
 
@@ -27,6 +29,7 @@ impl DbKind {
         match self {
             DbKind::MySql => 3306,
             DbKind::Postgres => 5432,
+            DbKind::Mongo => 27017,
         }
     }
 }
@@ -62,13 +65,26 @@ impl DataSource {
         } else {
             format!("/{}", self.database)
         };
+        if let Some(rest) = self
+            .host
+            .strip_prefix("mongodb://")
+            .or_else(|| self.host.strip_prefix("mongodb+srv://"))
+        {
+            // URI: senza credenziali né parametri
+            let hosts = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
+            let hosts = hosts.split(['/', '?']).next().unwrap_or(hosts);
+            return format!("{} {hosts}{db}", self.kind.label());
+        }
+        let user = if self.user.is_empty() {
+            String::new()
+        } else {
+            format!("{}@", self.user)
+        };
         format!(
-            "{} {}@{}:{}{}",
+            "{} {user}{}:{}{db}",
             self.kind.label(),
-            self.user,
             self.host,
             self.port,
-            db
         )
     }
 }
@@ -216,6 +232,23 @@ pub fn save_session(s: &Session) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_hides_uri_credentials() {
+        let mut ds = DataSource {
+            id: "x".into(),
+            name: "x".into(),
+            kind: DbKind::Mongo,
+            host: "mongodb://u:segreta@h1:27017,h2/app?replicaSet=rs".into(),
+            port: 27017,
+            user: String::new(),
+            password: String::new(),
+            database: String::new(),
+        };
+        assert_eq!(ds.summary(), "MongoDB h1:27017,h2");
+        ds.host = "localhost".into();
+        assert_eq!(ds.summary(), "MongoDB localhost:27017");
+    }
 
     #[test]
     fn recent_files_are_deduplicated_and_capped() {

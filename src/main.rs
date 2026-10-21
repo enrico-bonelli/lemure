@@ -1,4 +1,4 @@
-//! Lemure — client SQL desktop (GTK4) per MySQL e PostgreSQL.
+//! Lemure — client desktop (GTK4) per MySQL, PostgreSQL e MongoDB.
 
 mod ui;
 

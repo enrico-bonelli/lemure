@@ -6,7 +6,7 @@ use super::tab::QueryTab;
 use super::util::show_error;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
-use lemure::config::{self, RecentFile};
+use lemure::config;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -299,7 +299,7 @@ impl App {
     }
 
     #[cfg(feature = "devtools")]
-    pub fn recent_files(&self) -> Vec<RecentFile> {
+    pub fn recent_files(&self) -> Vec<config::RecentFile> {
         self.recent.borrow().clone()
     }
 }

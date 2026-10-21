@@ -202,6 +202,9 @@ pub fn complete(
     meta: &SchemaMeta,
     explicit: bool,
 ) -> Option<Completion> {
+    if dialect == Dialect::Mongo {
+        return crate::mongo::complete::complete(text, cursor, meta, explicit);
+    }
     let all = sqlutil::lex(text, dialect);
 
     // Nessun completamento dentro stringhe, commenti e numeri.
@@ -424,7 +427,20 @@ pub fn complete(
         }
     }
 
-    // Filtro: prima chi inizia con il prefisso, poi (con almeno 2 caratteri) chi lo contiene.
+    finish(items, missing, start, cursor, prefix, context, explicit)
+}
+
+/// Filtra e ordina i candidati: prima chi inizia con il prefisso, poi (con
+/// almeno 2 caratteri) chi lo contiene.
+pub(crate) fn finish(
+    items: Vec<Item>,
+    mut missing: Vec<(String, String)>,
+    start: usize,
+    cursor: usize,
+    prefix: String,
+    context: Context,
+    explicit: bool,
+) -> Option<Completion> {
     let p = prefix.to_lowercase();
     let mut ranked: Vec<(u8, Item)> = items
         .into_iter()

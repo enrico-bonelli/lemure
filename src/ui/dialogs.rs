@@ -79,8 +79,9 @@ pub fn datasource_dialog(app: &Rc<App>, existing: Option<DataSource>) {
         .placeholder_text("es. Sviluppo locale")
         .hexpand(true)
         .build();
-    let kind = gtk::DropDown::from_strings(&["MySQL", "PostgreSQL"]);
-    kind.set_selected(if ds.kind == DbKind::MySql { 0 } else { 1 });
+    const KINDS: [DbKind; 3] = [DbKind::MySql, DbKind::Postgres, DbKind::Mongo];
+    let kind = gtk::DropDown::from_strings(&KINDS.map(DbKind::label));
+    kind.set_selected(KINDS.iter().position(|k| *k == ds.kind).unwrap_or(0) as u32);
     let host = gtk::Entry::builder().text(&ds.host).build();
     let port = gtk::SpinButton::with_range(1.0, 65535.0, 1.0);
     port.set_value(ds.port as f64);
@@ -91,29 +92,41 @@ pub fn datasource_dialog(app: &Rc<App>, existing: Option<DataSource>) {
         .build();
     let database = gtk::Entry::builder().text(&ds.database).build();
     let set_hint = {
-        let database = database.clone();
-        move |mysql: bool| {
-            database.set_placeholder_text(Some(if mysql {
-                "(vuoto = mostra tutti i database)"
-            } else {
-                "(vuoto = database con il nome dell'utente)"
+        let (database, host, user) = (database.clone(), host.clone(), user.clone());
+        move |kind: DbKind| {
+            database.set_placeholder_text(Some(match kind {
+                DbKind::MySql | DbKind::Mongo => "(vuoto = mostra tutti i database)",
+                DbKind::Postgres => "(vuoto = database con il nome dell'utente)",
             }));
+            host.set_placeholder_text(
+                (kind == DbKind::Mongo).then_some("host oppure URI mongodb://…"),
+            );
+            user.set_placeholder_text(
+                (kind == DbKind::Mongo).then_some("(vuoto = senza autenticazione)"),
+            );
         }
     };
-    set_hint(ds.kind == DbKind::MySql);
+    set_hint(ds.kind);
     {
-        let port = port.clone();
+        let (port, user) = (port.clone(), user.clone());
         kind.connect_selected_notify(move |dd| {
-            let mysql = dd.selected() == 0;
-            let (old, new) = if mysql {
-                (5432.0, 3306.0)
-            } else {
-                (3306.0, 5432.0)
-            };
-            if port.value() == old {
-                port.set_value(new);
+            let new = KINDS[(dd.selected() as usize).min(KINDS.len() - 1)];
+            // la porta e l'utente predefiniti seguono il tipo, se non sono stati cambiati
+            if KINDS
+                .iter()
+                .any(|k| port.value() == k.default_port() as f64)
+            {
+                port.set_value(new.default_port() as f64);
             }
-            set_hint(mysql);
+            let u = user.text();
+            if matches!(u.as_str(), "" | "root" | "postgres") {
+                user.set_text(match new {
+                    DbKind::MySql => "root",
+                    DbKind::Postgres => "postgres",
+                    DbKind::Mongo => "",
+                });
+            }
+            set_hint(new);
         });
     }
 
@@ -166,11 +179,7 @@ pub fn datasource_dialog(app: &Rc<App>, existing: Option<DataSource>) {
         move || DataSource {
             id: id.clone(),
             name: name.text().trim().to_string(),
-            kind: if kind.selected() == 0 {
-                DbKind::MySql
-            } else {
-                DbKind::Postgres
-            },
+            kind: KINDS[(kind.selected() as usize).min(KINDS.len() - 1)],
             host: host.text().trim().to_string(),
             port: port.value() as u16,
             user: user.text().trim().to_string(),
@@ -493,7 +502,12 @@ pub fn show_analyze(app: &Rc<App>, ds_id: String, schema: String, table: String)
     let Some(ds) = app.datasource(&ds_id) else {
         return;
     };
-    let win = dialog_window(&app.window, &format!("Analizza tabella — {table}"), false);
+    let what = if ds.kind == DbKind::Mongo {
+        "collection"
+    } else {
+        "tabella"
+    };
+    let win = dialog_window(&app.window, &format!("Analizza {what} — {table}"), false);
     win.set_default_size(900, 600);
     let spinner = gtk::Spinner::new();
     spinner.start();
@@ -577,13 +591,22 @@ fn analysis_view(
         l.set_selectable(true);
         general.append(&l);
     }
-    let summary = gtk::Label::new(Some(&format!(
-        "{} colonne · {} indici · {} chiavi esterne · referenziata da {} vincoli",
-        a.columns.rows.len(),
-        a.indexes.len(),
-        a.foreign_keys.len(),
-        a.referenced_by.len()
-    )));
+    let mongo = dialect == lemure::sqlutil::Dialect::Mongo;
+    let summary = gtk::Label::new(Some(&if mongo {
+        format!(
+            "{} campi · {} indici",
+            a.columns.rows.len(),
+            a.indexes.len()
+        )
+    } else {
+        format!(
+            "{} colonne · {} indici · {} chiavi esterne · referenziata da {} vincoli",
+            a.columns.rows.len(),
+            a.indexes.len(),
+            a.foreign_keys.len(),
+            a.referenced_by.len()
+        )
+    }));
     summary.set_xalign(0.0);
     summary.add_css_class("dim-label");
     general.append(&summary);
@@ -608,7 +631,11 @@ fn analysis_view(
     // --- Colonne
     nb.append_page(
         &grid_with(a.columns.clone(), font),
-        Some(&gtk::Label::new(Some("Colonne"))),
+        Some(&gtk::Label::new(Some(if mongo {
+            "Campi"
+        } else {
+            "Colonne"
+        }))),
     );
 
     // --- Indici
@@ -641,7 +668,7 @@ fn analysis_view(
         )))),
     );
 
-    // --- Chiavi esterne (uscenti e entranti)
+    // --- Chiavi esterne (uscenti e entranti); MongoDB non ne ha
     let fk_box = gtk::Paned::new(gtk::Orientation::Vertical);
     let out_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     out_box.append(&section_title("Chiavi esterne di questa tabella"));
@@ -652,14 +679,16 @@ fn analysis_view(
     fk_box.set_start_child(Some(&out_box));
     fk_box.set_end_child(Some(&in_box));
     fk_box.set_position(260);
-    nb.append_page(
-        &fk_box,
-        Some(&gtk::Label::new(Some(&format!(
-            "Chiavi esterne ({} / {})",
-            a.foreign_keys.len(),
-            a.referenced_by.len()
-        )))),
-    );
+    if !mongo {
+        nb.append_page(
+            &fk_box,
+            Some(&gtk::Label::new(Some(&format!(
+                "Chiavi esterne ({} / {})",
+                a.foreign_keys.len(),
+                a.referenced_by.len()
+            )))),
+        );
+    }
 
     // --- DDL con evidenziazione della sintassi
     let ddl = QueryEditor::new(dialect, editor_font);
@@ -670,6 +699,13 @@ fn analysis_view(
     unsafe {
         ddl_widget.set_data("editor", ddl);
     }
-    nb.append_page(&ddl_widget, Some(&gtk::Label::new(Some("DDL"))));
+    nb.append_page(
+        &ddl_widget,
+        Some(&gtk::Label::new(Some(if mongo {
+            "Comandi"
+        } else {
+            "DDL"
+        }))),
+    );
     nb.upcast()
 }

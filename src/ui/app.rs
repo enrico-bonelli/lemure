@@ -346,7 +346,7 @@ columnview.data-grid .current-cell {{ background-color: alpha(#3584e4, 0.22); bo
             let about = gtk::AboutDialog::builder()
                 .program_name("Lemure")
                 .version(env!("CARGO_PKG_VERSION"))
-                .comments("Client SQL leggero per MySQL e PostgreSQL")
+                .comments("Client leggero per MySQL, PostgreSQL e MongoDB")
                 .license_type(gtk::License::MitX11)
                 .logo_icon_name("it.lemure.Lemure")
                 .transient_for(&app.window)
@@ -741,10 +741,19 @@ columnview.data-grid .current-cell {{ background-color: alpha(#3584e4, 0.22); bo
             .datasource(ds_id)
             .map(|d| d.database)
             .unwrap_or_default();
+        if dialect == Dialect::Mongo {
+            let other_db = (!schema.is_empty() && schema != ds_db).then_some(schema);
+            let coll = lemure::mongo::parse::collection_ref(other_db, table);
+            return if count {
+                format!("{coll}.countDocuments({{}})")
+            } else {
+                format!("{coll}.find({{}})")
+            };
+        }
         // Lo schema si omette quando è quello di default della connessione.
         let qualify = match dialect {
             Dialect::MySql => !schema.is_empty() && schema != ds_db,
-            Dialect::Postgres => !schema.is_empty() && schema != "public",
+            Dialect::Postgres | Dialect::Mongo => !schema.is_empty() && schema != "public",
         };
         let name = if qualify {
             format!(

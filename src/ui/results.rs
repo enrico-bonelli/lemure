@@ -327,6 +327,11 @@ impl ResultsView {
         }
     }
 
+    #[cfg(feature = "devtools")]
+    pub fn dev_info(&self) -> String {
+        self.info.text().to_string()
+    }
+
     pub fn set_info(&self, text: &str) {
         self.info.set_text(text);
         self.info.set_tooltip_text(Some(text));

@@ -234,7 +234,7 @@ impl QueryEditor {
             _ => (self.text(), 0),
         };
         let toks = sqlutil::lex(&text, d);
-        let stmts = sqlutil::split_statements(&toks, true, &text);
+        let stmts = sqlutil::split_statements_in(&toks, true, &text, d);
         let selected = self.buffer.has_selection() && !whole_script;
         let chosen: Vec<sqlutil::Stmt> = if whole_script || selected {
             stmts
@@ -375,7 +375,8 @@ impl QueryEditor {
         ] {
             buf.remove_tag(tag, &start, &end);
         }
-        let toks = sqlutil::lex(&text, self.dialect.get());
+        let dialect = self.dialect.get();
+        let toks = sqlutil::lex(&text, dialect);
         let apply = |tag: &gtk::TextTag, s: usize, e: usize| {
             buf.apply_tag(
                 tag,
@@ -395,12 +396,14 @@ impl QueryEditor {
                         .iter()
                         .find(|n| n.kind != Tok::Space)
                         .is_some_and(|n| n.kind == Tok::OpenParen);
-                    // Le parole dopo un punto (es. t.select) sono nomi, non keyword.
+                    // Le parole dopo un punto (es. t.select) sono nomi, non keyword;
+                    // con MongoDB però `.find(` è un metodo.
                     let after_dot = i > 0 && &text[toks[i - 1].start..toks[i - 1].end] == ".";
-                    if after_dot {
+                    if after_dot && !(dialect == Dialect::Mongo && next_paren) {
                         continue;
                     }
-                    match sqlutil::classify_word(&text[tok.start..tok.end], next_paren) {
+                    match sqlutil::classify_word_in(&text[tok.start..tok.end], next_paren, dialect)
+                    {
                         WordClass::Keyword => &t.keyword,
                         WordClass::Type => &t.typ,
                         WordClass::Function => &t.func,
@@ -881,10 +884,15 @@ impl QueryEditor {
                 buf.text(&a, &b, false).to_string()
             })
             .collect();
+        let mark = if self.dialect.get() == Dialect::Mongo {
+            "//"
+        } else {
+            "--"
+        };
         let all_commented = lines
             .iter()
             .filter(|l| !l.trim().is_empty())
-            .all(|l| l.trim_start().starts_with("--"));
+            .all(|l| l.trim_start().starts_with(mark));
         buf.begin_user_action();
         for (i, text) in lines.iter().enumerate() {
             let l = first + i as i32;
@@ -901,7 +909,7 @@ impl QueryEditor {
                 buf.delete(&mut a, &mut b);
             } else {
                 let mut a = buf.iter_at_line(l).unwrap();
-                buf.insert(&mut a, "-- ");
+                buf.insert(&mut a, &format!("{mark} "));
             }
         }
         buf.end_user_action();

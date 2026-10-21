@@ -430,7 +430,7 @@ impl QueryTab {
             let started = Instant::now();
             let base = sqlutil::pageable_base(&sql, dialect);
             let q = match &base {
-                Some(b) => sqlutil::paged_sql(b, PAGE_SIZE + 1, 0),
+                Some(b) => sqlutil::paged_sql(b, PAGE_SIZE + 1, 0, dialect),
                 None => sql.clone(),
             };
             let res = worker.run(move |c| c.execute(&q)).await.and_then(|r| r);
@@ -444,6 +444,15 @@ impl QueryTab {
                     self.results.show_messages();
                     failed = true;
                     break;
+                }
+                Ok(StmtResult::Message(message)) => {
+                    let msg = format!("✓ {short} — {message} ({})", fmt_duration(elapsed));
+                    self.results.log(&msg, Some("ok"));
+                    last_affected = Some(msg);
+                    let kw = sqlutil::first_keyword(&sql, dialect);
+                    if matches!(kw.as_str(), "CREATE" | "DROP" | "RENAME") {
+                        app.schema_changed(&ds_id);
+                    }
                 }
                 Ok(StmtResult::Affected { rows, message }) => {
                     let msg = format!(
@@ -465,6 +474,14 @@ impl QueryTab {
                     }
                 }
                 Ok(StmtResult::Rows(mut rs)) => {
+                    // Su MongoDB `use` cambia il database della scheda: il conteggio
+                    // (su una connessione separata) deve usare lo stesso.
+                    let mut ds = ds.clone();
+                    if dialect == Dialect::Mongo
+                        && let Ok(Ok(db)) = worker.run(|c| c.current_schema()).await
+                    {
+                        ds.database = db;
+                    }
                     let state = match base {
                         Some(base) => {
                             let has_more = rs.rows.len() > PAGE_SIZE;
@@ -699,7 +716,8 @@ impl QueryTab {
         let started = Instant::now();
         let res = match self.ensure_worker(&app, &ds_id).await {
             Ok(w) => {
-                let q = sqlutil::paged_sql(&base, PAGE_SIZE + 1, target * PAGE_SIZE);
+                let dialect = db::dialect_of(self.state.borrow().as_ref().unwrap().ds.kind);
+                let q = sqlutil::paged_sql(&base, PAGE_SIZE + 1, target * PAGE_SIZE, dialect);
                 w.run(move |c| c.execute(&q)).await.and_then(|r| r)
             }
             Err(e) => Err(e),
